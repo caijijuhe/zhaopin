@@ -1,0 +1,8 @@
+O
+B-knowledge
+I-knowledge
+B-skill
+I-skill
+B-quality
+I-quality
+

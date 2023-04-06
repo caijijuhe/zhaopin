@@ -1,0 +1,9 @@
+O
+B-job
+I-job
+B-major
+I-major
+B-extent
+I-extent
+B-wealthfare
+I-wealthfare
