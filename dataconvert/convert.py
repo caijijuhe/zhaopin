@@ -90,7 +90,7 @@ def convert2bio(input_data_file, output_datafile):
             tagsB = ['O'] * len(text)
             for j in range(len(labels)):
                 label = labels[j]
-                if label[2] in ["wor", "sub", "lev", "ben"]:
+                if label[2] in ["job", "maior", "extent", "wealthfare"]:
                     GenerateLabel(tagsA, label)
                 else:
                     GenerateLabel(tagsB, label)
@@ -102,6 +102,6 @@ def convert2bio(input_data_file, output_datafile):
 if __name__ == '__main__':
     # generate_json()
     # split_data('corpus/corpus.json')
-    # convert2bio('corpus/train.json', 'trainBIO')
+    convert2bio('corpus/corpus.json', 'MRCBIO')
     # convert2bio('corpus/test.json', 'testBIO')
-    convert2pointer('corpus/corpus.json', 'corpus/corpus4pointer.json')
+    # convert2pointer('corpus/corpus.json', 'corpus/corpus4pointer.json')

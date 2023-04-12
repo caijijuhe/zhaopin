@@ -56,7 +56,7 @@ def generate_position_embedding(bert_model_file):
     """
     state_dict = torch.load(bert_model_file)
     # 加载bert预训练文件中的position embedding的weight
-    embedding_weight = state_dict['embeddings.position_embeddings.weight']
+    embedding_weight = state_dict['bert.embeddings.position_embeddings.weight']
     hierarchical_position = BertHierarchicalPositionEmbedding()
     hierarchical_position.weight.data.copy_(embedding_weight)
     # 不参与模型训练
@@ -101,7 +101,10 @@ def load_ner_model(opt):
     通过存盘文件加载ner模型
     """
     # 加载模型
-    model_file = os.path.join(opt.save_model_dir, opt.load_model)
+    if opt.use == 'A':
+        model_file = os.path.join(opt.save_model_dir_A, opt.load_model)
+    else:
+        model_file = os.path.join(opt.save_model_dir_B, opt.load_model)
     saved_dict = torch.load(model_file)
     ner_model = saved_dict['ner_model']
 
@@ -117,10 +120,16 @@ def save_ner_model(opt, model, accuracy):
     """
     保存ner模型
     """
-    torch.save({
-        'ner_model':model.state_dict()
-    }, os.path.join(os.path.dirname(__file__), opt.save_model_dir, 'ner_model_acc_{:.2f}.pth'.format(accuracy))
-    )    
+    if opt.use == 'A':
+        torch.save({
+            'ner_model': model.state_dict()
+        }, os.path.join(os.path.dirname(__file__), opt.save_model_dir_A, 'ner_model_acc_{:.2f}.pth'.format(accuracy))
+        )
+    else:
+        torch.save({
+            'ner_model': model.state_dict()
+        }, os.path.join(os.path.dirname(__file__), opt.save_model_dir_B, 'ner_model_acc_{:.2f}.pth'.format(accuracy))
+        )
 
 if __name__ == '__main__':
     import os

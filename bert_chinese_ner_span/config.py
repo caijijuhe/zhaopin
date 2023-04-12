@@ -31,6 +31,7 @@ class ArgsParse:
         parser.add_argument('--dropout', default=0.1, help='dropout层比率')
         parser.add_argument('--per_steps_loss', default=100, help='模型训练计算平均loss的间隔')
         parser.add_argument('--use_amp', default=True, help='是否使用混合精度训练')
+        parser.add_argument('--use', default="B", help='A或B')
         parser.add_argument('--warmup_proportion', default=0.1, help='warmup步长占比')
         parser.add_argument('--weight_decay', default=0.001, help='权重衰减值')
         parser.add_argument('--adam_epsilon', default=1e-8, type=float)
@@ -40,10 +41,13 @@ class ArgsParse:
         parser.add_argument('--local_model_dir', default='bert_model/', help='bert模型本地缓存目录')
         parser.add_argument('--max_position_length', default=1024, help='模型输入position最大长度')
         # 语料参数
-        parser.add_argument('--train_file', default='corpus/msra_mid/msra_train.json', help='训练语料文件')
-        parser.add_argument('--test_file', default='corpus/msra_mid/msra_test.json', help='测试语料文件')
+        parser.add_argument('--train_file_A', default='corpus/BIO/model_A/trainA.json', help='训练A语料文件')
+        parser.add_argument('--test_file_A', default='corpus/BIO/model_A/testA.json', help='测试A语料文件')
+        parser.add_argument('--train_file_B', default='corpus/BIO/model_B/trainB.json', help='训练B语料文件')
+        parser.add_argument('--test_file_B', default='corpus/BIO/model_B/testB.json', help='测试B语料文件')
         # 模型保存参数
-        parser.add_argument('--save_model_dir', default='saved_model/', help='模型存盘文件夹')
+        parser.add_argument('--save_model_dir_A', default='saved_model_A/', help='A模型存盘文件夹')
+        parser.add_argument('--save_model_dir_B', default='saved_model_B/', help='B模型存盘文件夹')
         parser.add_argument('--load_model', default='', help='加载的模型存盘文件')
 
         return parser
@@ -55,9 +59,12 @@ class ArgsParse:
         # 训练设备
         options.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         # 实体标签
-        options.tags = {"job": 1, "major": 2, "extent": 3, "wealthfare":4}
+        # # A实体标签
+        # options.tags = {"job": 1, "major": 2, "extent": 3, "wealthfare":4}
+        # options.tags_rev = Dict({v: k for k, v in options.tags.items()})
+        # B实体标签
+        options.tags = {"skill": 1, "quality": 2, "knowledge": 3}
         options.tags_rev = Dict({v: k for k, v in options.tags.items()})
-
         return options
 
     @staticmethod

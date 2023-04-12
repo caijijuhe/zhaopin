@@ -97,7 +97,10 @@ def load_ner_model(opt):
     通过存盘文件加载ner模型
     """
     # 加载模型
-    model_file = os.path.join(os.path.dirname(__file__), opt.save_model_dir, opt.load_model)
+    if opt.use == 'A':
+        model_file = os.path.join(os.path.dirname(__file__), opt.save_model_dir_A, opt.load_model)
+    else:
+        model_file = os.path.join(os.path.dirname(__file__), opt.save_model_dir_B, opt.load_model)
     saved_dict = torch.load(model_file)
     mid_linear_dims = saved_dict['mid_linear_dims']
     num_tags = saved_dict['num_tags']
@@ -125,15 +128,26 @@ def save_ner_model(opt, model, accuracy):
     """
     保存ner模型
     """
-    torch.save({
-        'mid_linear_dims': model.mid_linear_dims,
-        'num_tags': model.num_tags,
-        'dropout_prob': model.dropout_prob,
-        'mid_linear': model.mid_linear.state_dict(),
-        'start': model.start.state_dict(),
-        'end': model.end.state_dict()
-    }, os.path.join(os.path.dirname(__file__), opt.save_model_dir, 'ner_model_acc_{:.2f}.pth'.format(accuracy))
-    )
+    if opt.use == 'A':
+        torch.save({
+            'mid_linear_dims': model.mid_linear_dims,
+            'num_tags': model.num_tags,
+            'dropout_prob': model.dropout_prob,
+            'mid_linear': model.mid_linear.state_dict(),
+            'start': model.start.state_dict(),
+            'end': model.end.state_dict()
+        }, os.path.join(os.path.dirname(__file__), opt.save_model_dir_A, 'ner_model_acc_{:.2f}.pth'.format(accuracy))
+        )
+    else:
+        torch.save({
+            'mid_linear_dims': model.mid_linear_dims,
+            'num_tags': model.num_tags,
+            'dropout_prob': model.dropout_prob,
+            'mid_linear': model.mid_linear.state_dict(),
+            'start': model.start.state_dict(),
+            'end': model.end.state_dict()
+        }, os.path.join(os.path.dirname(__file__), opt.save_model_dir_B, 'ner_model_acc_{:.2f}.pth'.format(accuracy))
+        )
 
 
 if __name__ == '__main__':

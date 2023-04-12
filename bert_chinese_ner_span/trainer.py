@@ -2,7 +2,7 @@ import os
 import torch
 from tqdm import tqdm
 from transformers import AdamW, get_linear_schedule_with_warmup, get_cosine_with_hard_restarts_schedule_with_warmup
-
+from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 from ner_dataset import NerIterableDataset
 from model_utils import custom_local_bert_tokenizer
 from ner_dataset import NerDataset
@@ -10,17 +10,19 @@ from process import generate_dataloader, entity_collect
 from bert_span import BertSpan
 from torchmetrics import Accuracy
 from model_utils import custom_local_bert, save_ner_model, load_ner_model
-
+from torchmetrics import MetricCollection
+from torch.utils.tensorboard import SummaryWriter
 from config import ArgsParse
 import warnings
 
 # 禁用UserWarning
 warnings.filterwarnings("ignore")
+writer = SummaryWriter(log_dir='nerlog')
 
 
 def build_optimizer_and_scheduler(opt, model, t_total):
     # 差分学习率、动态学习率
-    no_decay = ["bias", "LayerNorm.weight"]
+    no_decay = ['bias', 'gamma', 'beta']
     model_param = list(model.named_parameters())
 
     bert_param = []
@@ -57,6 +59,10 @@ def build_optimizer_and_scheduler(opt, model, t_total):
 
 
 def train(opt, model, train_loader, test_loader):
+    acc_num = 0
+    f1_num = 0
+    pre_num = 0
+    re_num = 0
     t_total = len(train_loader) * opt.epochs
     # 构建模型的optimizer和支持差分学习率的scheduler
     optimizer, scheduler = build_optimizer_and_scheduler(opt, model, t_total)
@@ -97,8 +103,8 @@ def train(opt, model, train_loader, test_loader):
                 if counter >= opt.step_train_loss:
                     # 计算并更新梯度
                     total_loss.backward()
+                    torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
                     optimizer.step()
-                    # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
                     total_loss = 0
                     counter = 0
                 """
@@ -113,9 +119,18 @@ def train(opt, model, train_loader, test_loader):
 
             pbar.set_description('Epoch: %d/%d average loss: %.5f' % (epoch + 1, opt.epochs, loss.item()))
         # 每轮epochs后评价
-        acc = evaluate(opt, model, test_loader)
+        Accuracy, F1Score, Precision, Recall = evaluate(opt, model, test_loader)
+        writer.add_scalar('test_acc', Accuracy, acc_num)
+        writer.add_scalar('test_f1', F1Score, f1_num)
+        writer.add_scalar('test_pre', Precision, pre_num)
+        writer.add_scalar('test_re', Recall, re_num)
+
+        f1_num += 1
+        acc_num += 1
+        pre_num += 1
+        re_num += 1
         # 每轮epochs后保存模型
-        save_ner_model(opt, model, acc)
+        save_ner_model(opt, model, Accuracy)
 
 
 def evaluate(opt, model, test_dl):
@@ -123,8 +138,19 @@ def evaluate(opt, model, test_dl):
     if opt.use_amp:
         scaler = torch.cuda.amp.GradScaler()
 
-    metric = Accuracy(task='multiclass', num_classes=9)
-    metric.to(opt.device)
+    if opt.use == 'A':
+        metric_Collection = MetricCollection([
+            MulticlassPrecision(task='multiclass', num_classes=9),
+            MulticlassRecall(task='multiclass', num_classes=9),
+            MulticlassAccuracy(task='multiclass', num_classes=9),
+            MulticlassF1Score(task='multiclass', num_classes=9)])
+    else:
+        metric_Collection = MetricCollection([
+            MulticlassPrecision(task='multiclass', num_classes=7),
+            MulticlassRecall(task='multiclass', num_classes=7),
+            MulticlassAccuracy(task='multiclass', num_classes=7),
+            MulticlassF1Score(task='multiclass', num_classes=7)])
+    metric_Collection.to(opt.device)
     pbar = tqdm(test_dl)
     # 模型评价
     model.eval()
@@ -149,8 +175,8 @@ def evaluate(opt, model, test_dl):
         start_ids = start_ids[mask]
         end_ids = end_ids[mask]
         # 计算准确率
-        metric(start_pred, start_ids)
-        metric(end_pred, end_ids)
+        metric_Collection(start_pred, start_ids)
+        metric_Collection(end_pred, end_ids)
 
         # 筛选非零内容
         start_idx = torch.nonzero(torch.squeeze(start_ids))
@@ -166,11 +192,15 @@ def evaluate(opt, model, test_dl):
             entities_count[opt.tags_rev[tidx]] += 1
 
         pbar.set_description('Accuracy')
-    acc = metric.compute()
+    dict = metric_Collection.compute()
     print(entities_count)
     print(opt.entity_collect)
-    print('Accuracy of the model on test: %.2f %%' % (acc.item() * 100))
-    return acc * 100
+    print('Accuracy of the model on test: %.2f %%\n' % (dict['MulticlassAccuracy'].item() * 100))
+    print('F1Score of the model on test: %.2f %%\n' % (dict['MulticlassF1Score'].item() * 100))
+    print('Precision of the model on test: %.2f %%\n' % (dict['MulticlassPrecision'].item() * 100))
+    print('Recall of the model on test: %.2f %%\n' % (dict['MulticlassRecall'].item() * 100))
+    return dict['MulticlassAccuracy'].item(), dict['MulticlassF1Score'].item(), \
+           dict['MulticlassPrecision'].item(), dict['MulticlassRecall'].item()
 
 
 if __name__ == '__main__':
@@ -185,7 +215,7 @@ if __name__ == '__main__':
     # 训练用数据
     train_file = os.path.join(os.path.dirname(__file__), opt.train_file)
     test_file = os.path.join(os.path.dirname(__file__), opt.test_file)
-    train_ds = NerIterableDataset (train_file)
+    train_ds = NerIterableDataset(train_file)
     test_ds = NerDataset(test_file)
     train_dl = generate_dataloader(train_ds, tokenizer, opt.tags, opt.batch_size)
     test_dl = generate_dataloader(test_ds, tokenizer, opt.tags, 2)
@@ -202,6 +232,7 @@ if __name__ == '__main__':
             mid_linear_dims=opt.mid_linear_dims,
             num_tags=len(opt.tags) * 2 + 1
         )
+
     model.to(opt.device)
 
     # 训练模型

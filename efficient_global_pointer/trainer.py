@@ -12,7 +12,7 @@ import os
 import torch
 import numpy as np
 from tqdm import tqdm
-from transformers import AdamW, get_linear_schedule_with_warmup
+from transformers import AdamW, get_linear_schedule_with_warmup, get_cosine_schedule_with_warmup
 
 from bert_egp import EffiGlobalPointer
 from config import ArgsParse
@@ -20,11 +20,12 @@ from model_utils import (custom_local_bert, custom_local_bert_tokenizer,
                          load_ner_model, save_ner_model)
 from ner_dataset import NerDataset
 from process import corpus_split, get_dataloader, load_bio_corpus, entity_collect
+from torch.utils.tensorboard import SummaryWriter
 
-
+writer = SummaryWriter(log_dir='nerlog')
 def build_optimizer_and_scheduler(opt, model, t_total):
     # 差分学习率
-    no_decay = no_decay = ['bias', 'gamma', 'beta']
+    no_decay = ['bias', 'gamma', 'beta']
     model_param = list(model.named_parameters())
 
     bert_param, other_param = [], []
@@ -51,7 +52,7 @@ def build_optimizer_and_scheduler(opt, model, t_total):
     ]
 
     optimizer = AdamW(optimizer_grouped_parameters, lr=opt.bert_lr, eps=opt.adam_epsilon)
-    scheduler = get_linear_schedule_with_warmup(
+    scheduler = get_cosine_schedule_with_warmup(
         optimizer, num_warmup_steps=int(opt.warmup_proportion * t_total), num_training_steps=t_total
     )
 
@@ -59,6 +60,10 @@ def build_optimizer_and_scheduler(opt, model, t_total):
 
 
 def train(opt, model, train_loader, validate_loader):
+    acc_num = 1
+    f1_num = 1
+    precision_num = 1
+    recall_num = 1
     t_total = len(train_loader) * opt.epochs
     # 构建模型的optimizer和支持差分学习率的scheduler
     optimizer, scheduler = build_optimizer_and_scheduler(opt, model, t_total)
@@ -81,22 +86,31 @@ def train(opt, model, train_loader, validate_loader):
             # 梯度累加
             # real_batch_size = batch_size * accumlation_steps
             if i % opt.accumulation_steps == opt.accumulation_steps - 1:
-                optimizer.step()
                 # 梯度裁剪
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
+                optimizer.step()
                 scheduler.step()
                 model.zero_grad()
 
                 pbar.set_description('Epoch: %d/%d loss: %.5f' % (epoch + 1, opt.epochs, loss.item()))
         # 每轮epochs后评价
-        f1_score = evaluate(opt, model, validate_loader)
+        f1_score, precision, recall, acc = evaluate(opt, model, validate_loader)
+
+        writer.add_scalar('acc', acc, acc_num)
+        acc_num += 1
+        writer.add_scalar('val_f1', f1_score, f1_num)
+        f1_num += 1
+        writer.add_scalar('precision', precision, precision_num)
+        precision_num += 1
+        writer.add_scalar('recall', recall, recall_num)
+        recall_num += 1
         # 每轮epochs后保存模型
         save_ner_model(opt, model, f1_score)
 
 
 def global_pointer_f1_score(y_true, y_pred):
     y_pred = torch.greater(y_pred, 0)
-    return torch.sum(y_true * y_pred), torch.sum(y_true + y_pred)
+    return torch.sum(y_true * y_pred), torch.sum(y_true + y_pred),y_pred   # y_pred 用于计算TP+FP
 
 
 def evaluate(opt, model, dataloader):
@@ -104,6 +118,7 @@ def evaluate(opt, model, dataloader):
     model.eval()
     val_loss = 0
     total_n, total_d = 0, 0
+    y_p_n, label = 0, 0
     # 预测匹配的实体计数
     entities_count = {k: 0 for k in opt.categories_rev}
     with torch.no_grad():
@@ -121,9 +136,29 @@ def evaluate(opt, model, dataloader):
                 if logits[c, e, h, v] > 0:
                     entities_count[e.cpu().item()] += 1
 
-            num, den = global_pointer_f1_score(labels, logits)
-            total_n += num
-            total_d += den
+            num, den, y_p = global_pointer_f1_score(labels, logits)
+
+            total_n += num  # TP
+            total_d += den  # 2TP+FP+FN
+            y_p = torch.sum(y_p)
+            y_p_n += y_p
+            lab = torch.sum(labels)
+            label += lab
+    V = [v for k, v in opt.entity_collect.items()]
+    V = torch.tensor(V)
+    # 样本总数count
+    count = torch.sum(V)
+    count.to(opt.device)
+
+    # acc 准确率
+    acc = (total_n + (count - (total_d - total_n))) / count
+    print(f'\n准确率acc:{acc:.4f}')
+    # precision 精确率
+    precision = total_n / y_p_n
+    print(f"精确率precison:{precision:.4f}")
+    # recall 召回率
+    recall = total_n / label
+    print(f"召回率recall:{recall:.4f}")
     val_loss /= size
     val_f1 = 2 * total_n / total_d
     print(f"F1:{val_f1:>4f},Avg loss: {val_loss:>5f} \n")
@@ -131,7 +166,7 @@ def evaluate(opt, model, dataloader):
     print(''.join([f'{k}:{v}\n' for k, v in opt.entity_collect.items()]), end='')
     print("预测实体统计:")
     print(''.join([f'{opt.categories_rev[k]}:{v}\n' for k, v in entities_count.items()]), end='')
-    return val_f1
+    return val_f1,precision,recall,acc
 
 
 def main(opt):
@@ -159,6 +194,9 @@ def main(opt):
 
     # 验证集实体数量
     opt.entity_collect = entity_collect(opt, validate_loader)
+
+    # for name, param in model.named_parameters():
+    #     print(name, param.shape)
 
     # 训练模型并保存
     train(opt, model, train_loader, validate_loader)

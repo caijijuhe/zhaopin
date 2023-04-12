@@ -12,10 +12,12 @@ import torch
 from tqdm import tqdm
 import torchmetrics
 from corpus_proc import read_corpus, generate_dataloader
-from transformers import AdamW
+from transformers import AdamW, get_cosine_with_hard_restarts_schedule_with_warmup
 from ner_dataset import NerDataset
 from bert_crf import BertCRF
-
+from torchmetrics import MetricCollection
+from torch.utils.tensorboard import SummaryWriter
+from torchmetrics.classification import MulticlassAccuracy,MulticlassF1Score,MulticlassPrecision,MulticlassRecall
 from model_utils import custom_local_bert, custom_local_bert_tokenizer, load_ner_model, save_ner_model
 from config import ArgsParse
 
@@ -23,6 +25,44 @@ import warnings
 
 # 禁用UserWarning
 warnings.filterwarnings("ignore")
+writer = SummaryWriter(log_dir='nerlog')
+
+def build_optimizer_and_scheduler(opt, model, t_total):
+    # 差分学习率、动态学习率
+    no_decay = ['bias', 'gamma', 'beta']
+    model_param = list(model.named_parameters())
+
+    bert_param = []
+    other_param = []
+
+    for name, para in model_param:
+        space = name.split('.')
+        if space[0] == 'bert':
+            bert_param.append((name, para))
+        else:
+            other_param.append((name, para))
+
+    optimizer_grouped_parameters = [
+        # bert模型的差分学习率
+        {"params": [p for n, p in bert_param if not any(nd in n for nd in no_decay)],
+         "weight_decay": opt.weight_decay, 'lr': opt.bert_lr},
+        {"params": [p for n, p in bert_param if any(nd in n for nd in no_decay)],
+         "weight_decay": 0.0, 'lr': opt.bert_lr},
+
+        # 其他模型层的差分学习率
+        {"params": [p for n, p in other_param if not any(nd in n for nd in no_decay)],
+         "weight_decay": opt.weight_decay, 'lr': opt.other_lr},
+        {"params": [p for n, p in other_param if any(nd in n for nd in no_decay)],
+         "weight_decay": 0.0, 'lr': opt.other_lr},
+    ]
+
+    optimizer = AdamW(optimizer_grouped_parameters, lr=opt.bert_lr / 10, eps=opt.adam_epsilon)
+
+    scheduler = get_cosine_with_hard_restarts_schedule_with_warmup(
+        optimizer, num_warmup_steps=int(opt.warmup_proportion * t_total), num_training_steps=t_total
+    )
+
+    return optimizer, scheduler
 
 
 def get_dataloader(corpus_files, tags, tokenizer, batch_size=16):
@@ -39,8 +79,14 @@ def train(opt, model, train_dl, test_dl, entity_targets_count):
     """
     模型训练方法
     """
+    f1_num = 0
+    acc_num = 0
+    pre_num = 0
+    re_num = 0
     # 模型优化器
-    optimizer = AdamW(model.parameters(), lr=opt.learn_rate)
+    t_total = len(train_dl) * opt.epochs
+    # 构建模型的optimizer和支持差分学习率的scheduler
+    optimizer, scheduler = build_optimizer_and_scheduler(opt, model, t_total)
     # training
     for e in range(opt.epochs):
 
@@ -64,19 +110,39 @@ def train(opt, model, train_dl, test_dl, entity_targets_count):
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=0.25)
                 # 更新梯度
                 optimizer.step()
+                scheduler.step()
                 # 清除累计的梯度值
                 model.zero_grad()
                 pbar.set_description('Epochs %d/%d loss %f' % (e + 1, opt.epochs, loss.item()))
+        Accuracy, F1Score, Precision, Recall = accuracy(opt, model, test_dl, entity_targets_count)
+        writer.add_scalar('test_acc', Accuracy, acc_num)
+        writer.add_scalar('test_f1', F1Score, f1_num)
+        writer.add_scalar('test_pre', Precision, pre_num)
+        writer.add_scalar('test_re', Recall, re_num)
 
-        acc = accuracy(opt, model, test_dl, entity_targets_count)
+        f1_num += 1
+        acc_num += 1
+        pre_num += 1
+        re_num += 1
         # 每个epoch后保存模型
-        save_ner_model(opt, model, acc)
+        save_ner_model(opt, model, Accuracy)
 
 
 def accuracy(opt, model, test_dl, entity_targets_count):
     with torch.no_grad():  # 不进行反向传播
-        metric = torchmetrics.Accuracy(task='multiclass', num_classes=11)
-        metric.to(opt.device)
+        if opt.use == 'A':
+            metric_Collection = MetricCollection([
+                MulticlassPrecision(num_classes=11, average='micro'),
+                MulticlassRecall(num_classes=11, average='micro'),
+                MulticlassAccuracy(num_classes=11, average='micro'),
+                MulticlassF1Score(num_classes=11, average='micro')])
+        else:
+            metric_Collection = MetricCollection([
+                MulticlassPrecision(num_classes=9, average='micro'),
+                MulticlassRecall(num_classes=9, average='micro'),
+                MulticlassAccuracy(num_classes=9, average='micro'),
+                MulticlassF1Score(num_classes=9, average='micro')])
+        metric_Collection.to(opt.device)
         entity_matches_count = {}
         model.eval()
         pbar = tqdm(test_dl)
@@ -93,7 +159,7 @@ def accuracy(opt, model, test_dl, entity_targets_count):
 
             assert len(preds) == len(target), '预测标签长度需要和真实标签长度一致'
             # 记录并计算批次中准确率
-            metric(preds, target)
+            metric_Collection(preds, target)
 
             """
             国 务 院 发 布 最 新 通 告
@@ -110,9 +176,13 @@ def accuracy(opt, model, test_dl, entity_targets_count):
 
     print(entity_matches_count)
     print(entity_targets_count)
-    acc = metric.compute()
-    print('Accuracy of the model on test: %.2f %%' % (acc.item() * 100))
-    return acc * 100
+    dict = metric_Collection.compute()
+    print('Accuracy of the model on test: %.2f %%\n' % (dict['MulticlassAccuracy'].item() * 100))
+    print('F1Score of the model on test: %.2f %%\n' % (dict['MulticlassF1Score'].item() * 100))
+    print('Precision of the model on test: %.2f %%\n' % (dict['MulticlassPrecision'].item() * 100))
+    print('Recall of the model on test: %.2f %%\n' % (dict['MulticlassRecall'].item() * 100))
+    return dict['MulticlassAccuracy'].item(), dict['MulticlassF1Score'].item(), \
+           dict['MulticlassPrecision'].item(), dict['MulticlassRecall'].item()
 
 
 def entity_matche(preds, target, entity_pair_ix):
@@ -170,9 +240,14 @@ if __name__ == '__main__':
     tokenizer = custom_local_bert_tokenizer(local, max_position=opt.max_position_length)
 
     # 模型语料文件目录
-    train_file = os.path.join(os.path.dirname(__file__), opt.train_file)
-    dev_file = os.path.join(os.path.dirname(__file__), opt.dev_file)
-    test_file = os.path.join(os.path.dirname(__file__), opt.test_file)
+    if opt.use == 'A':
+        # A模型语料文件目录
+        train_file = os.path.join(os.path.dirname(__file__), opt.train_file_A)
+        test_file = os.path.join(os.path.dirname(__file__), opt.test_file_A)
+    else:
+        # A模型语料文件目录
+        train_file = os.path.join(os.path.dirname(__file__), opt.train_file_B)
+        test_file = os.path.join(os.path.dirname(__file__), opt.test_file_B)
 
     # 模型训练语料
     train_dl = get_dataloader(train_file, opt.tags, tokenizer, batch_size=opt.batch_size)
@@ -185,7 +260,13 @@ if __name__ == '__main__':
         target_size=len(opt.tags))
 
     # # 连续训练，加载之前存盘的模型
-    # model = load_ner_model(opt)
+    if len(opt.load_model) > 0:
+        if opt.use == 'A':
+            state_dict = torch.load(os.path.join(opt.save_model_dir_A, opt.load_model))
+            model.load_state_dict(state_dict)
+        else:
+            state_dict = torch.load(os.path.join(opt.save_model_dir_B, opt.load_model))
+            model.load_state_dict(state_dict)
 
     model.to(opt.device)
     # 模型训练
